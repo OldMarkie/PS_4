@@ -1,15 +1,20 @@
 syntax = "proto3";
 
-package ps4;
+package ocr;
 
-service DistributedAI {
-  rpc SendTask (TaskRequest) returns (TaskResponse);
+message ImageData {
+  bytes content = 1;
+  string filename = 2;
 }
 
-message TaskRequest {
-  string task = 1;
+message OCRResult {
+  string filename = 1;
+  string extracted_text = 2;
+  bool success = 3;
+  string error_message = 4;
 }
 
-message TaskResponse {
-  string result = 1;
+service OCRService {
+  // Streaming RPC – client sends many images, server streams results back as they finish
+  rpc ProcessImages (stream ImageData) returns (stream OCRResult);
 }

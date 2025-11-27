@@ -32,3 +32,16 @@ int main() {
 
     return 0;
 }
+
+
+std::shared_ptr<grpc::Channel> createChannel() {
+    while (true) {
+        auto ch = grpc::CreateChannel("server_ip:50051", grpc::InsecureChannelCredentials());
+        if (ch->WaitForConnected(gpr_time_add(gpr_now(GPR_CLOCK_REALTIME),
+            gpr_time_from_seconds(5, GPR_TIMESPAN)))) {
+            return ch;
+        }
+        std::cerr << "Cannot connect to server, retrying in 3s...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
+}
