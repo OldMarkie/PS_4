@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ps4;
+
+service DistributedAI {
+  rpc SendTask (TaskRequest) returns (TaskResponse);
+}
+
+message TaskRequest {
+  string task = 1;
+}
+
+message TaskResponse {
+  string result = 1;
+}
