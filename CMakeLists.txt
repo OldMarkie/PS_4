@@ -94,11 +94,17 @@ target_link_libraries(ps4_server
 # ---------------------------
 # Client target
 # ---------------------------
+
+qt6_wrap_cpp(MOC_SOURCES client.h)
+
+
 add_executable(ps4_client
     client.cpp
+    ${MOC_SOURCES}    #  this ensures MOC-generated cpp is compiled
     ${PROTO_SRCS}
     ${GRPC_SRCS}
 )
+
 
 target_include_directories(ps4_client PRIVATE ${PROTO_GEN_DIR})
 
@@ -112,3 +118,8 @@ target_link_libraries(ps4_client
         Qt6::Gui
         Qt6::Widgets
 )
+
+# Enable MOC for files with Q_OBJECT
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
