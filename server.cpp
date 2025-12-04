@@ -6,12 +6,12 @@
 
 #include <iostream>
 #include <thread>
-#include <queue>
 #include <mutex>
+#include <queue>
 #include <condition_variable>
 #include <vector>
 #include <string>
-#include <cstdlib> // for _putenv
+#include <cstdlib>
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -23,9 +23,9 @@ using grpc::Status;
 // ---------------------------
 struct OCRTask {
     std::string image_path;
-    ps4::TaskResponse* response;
-    ServerContext* context;
+    std::shared_ptr<ps4::TaskResponse> response; // use shared_ptr
 };
+
 
 std::queue<OCRTask> ocr_task_queue;
 std::mutex queue_mutex;
@@ -40,44 +40,48 @@ public:
         const ps4::TaskRequest* request,
         ps4::TaskResponse* response) override
     {
-        const std::string& imgPath = request->task();
+        try {
+            cv::Mat image = cv::imread(request->task(), cv::IMREAD_COLOR);
+            if (image.empty()) {
+                response->set_result("Failed to open image: " + request->task());
+                return Status::OK;
+            }
 
-        cv::Mat image = cv::imread(imgPath);
-        if (image.empty()) {
-            response->set_result("Failed to open image: " + imgPath);
+            cv::Mat aligned;
+            image.convertTo(aligned, CV_8UC3);
+            if (!aligned.isContinuous()) aligned = aligned.clone();
+
+            tesseract::TessBaseAPI ocr;
+            if (ocr.Init(nullptr, "eng") != 0) {
+                response->set_result("Failed to initialize Tesseract");
+                return Status::OK;
+            }
+
+            ocr.SetImage(aligned.data, aligned.cols, aligned.rows, aligned.channels(), static_cast<int>(aligned.step));
+            char* raw_text = ocr.GetUTF8Text();
+            std::string extracted = raw_text ? raw_text : "";
+            delete[] raw_text;
+
+            response->set_result(extracted);
             return Status::OK;
         }
-
-        // Init Tesseract
-        tesseract::TessBaseAPI ocr;
-        _putenv("TESSDATA_PREFIX=D:/Tools/vcpkg/installed/x64-windows/share/tessdata/");
-
-        if (ocr.Init(nullptr, "eng")) {
-            response->set_result("Failed to initialize Tesseract.");
+        catch (const std::exception& e) {
+            response->set_result("OCR Worker exception: " + std::string(e.what()));
             return Status::OK;
         }
-
-        ocr.SetImage(image.data, image.cols, image.rows, image.channels(), image.step);
-
-        char* raw_text = ocr.GetUTF8Text();
-        std::string extracted = raw_text ? raw_text : "";
-        delete[] raw_text; // IMPORTANT
-
-        response->set_result(extracted);
-        return Status::OK;
     }
+
+
+
 };
 
 // ---------------------------
 // OCR Worker Thread
 // ---------------------------
 void ocr_worker() {
-    // Set TESSDATA_PREFIX so Tesseract can find the traineddata files
-    _putenv("TESSDATA_PREFIX=D:/Tools/vcpkg/installed/x64-windows/share/tessdata/");
-
     tesseract::TessBaseAPI ocr;
     if (ocr.Init(nullptr, "eng") != 0) {
-        std::cerr << "Failed to initialize Tesseract." << std::endl;
+        std::cerr << "[Worker] Failed to initialize Tesseract OCR." << std::endl;
         return;
     }
 
@@ -90,19 +94,31 @@ void ocr_worker() {
             ocr_task_queue.pop();
         }
 
-        // Load image using OpenCV
-        cv::Mat image = cv::imread(task.image_path, cv::IMREAD_COLOR);
-        if (image.empty()) {
-            task.response->set_result("Failed to open image: " + task.image_path);
-            continue;
+        try {
+            cv::Mat image = cv::imread(task.image_path, cv::IMREAD_COLOR);
+            if (image.empty()) {
+                task.response->set_result("Failed to open image: " + task.image_path);
+                continue;
+            }
+
+            cv::Mat aligned;
+            image.convertTo(aligned, CV_8UC3);
+            if (!aligned.isContinuous()) aligned = aligned.clone();
+
+            ocr.SetImage(aligned.data, aligned.cols, aligned.rows, aligned.channels(), static_cast<int>(aligned.step));
+            char* raw_text = ocr.GetUTF8Text();
+            std::string extracted = raw_text ? raw_text : "";
+            delete[] raw_text;
+
+            task.response->set_result(extracted);
+            std::cout << "[Worker] Processed: " << task.image_path << std::endl;
         }
-
-        // Perform OCR
-        ocr.SetImage(image.data, image.cols, image.rows, image.channels(), image.step);
-        std::string extracted_text = ocr.GetUTF8Text();
-
-        task.response->set_result(extracted_text);
-        std::cout << "Processed image: " << task.image_path << std::endl;
+        catch (const std::exception& e) {
+            task.response->set_result("Worker error: " + std::string(e.what()));
+        }
+        catch (...) {
+            task.response->set_result("Worker encountered unknown error.");
+        }
     }
 }
 
@@ -117,7 +133,13 @@ void RunServer() {
     builder.RegisterService(&service);
 
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server running at 0.0.0.0:50051\n";
+    std::cout << "[Server] Running at 0.0.0.0:50051\n";
+
+    // Start a few background worker threads
+    const int WORKER_COUNT = 4;
+    for (int i = 0; i < WORKER_COUNT; ++i) {
+        std::thread(ocr_worker).detach();
+    }
 
     server->Wait();
 }
@@ -126,6 +148,19 @@ void RunServer() {
 // Main
 // ---------------------------
 int main() {
-    RunServer();
+    _putenv("TESSDATA_PREFIX=D:/Tools/vcpkg/installed/x64-windows/share/tessdata/");
+
+    try {
+        RunServer();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[Fatal] Exception: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+    catch (...) {
+        std::cerr << "[Fatal] Unknown exception." << std::endl;
+        return EXIT_FAILURE;
+    }
     return 0;
 }
+

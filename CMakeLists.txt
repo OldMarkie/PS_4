@@ -26,7 +26,7 @@ find_package(Protobuf REQUIRED CONFIG)
 find_package(gRPC REQUIRED CONFIG)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(Tesseract CONFIG REQUIRED)
-find_package(Qt6 COMPONENTS Core Widgets Gui REQUIRED)
+find_package(Qt6 COMPONENTS Core Widgets Gui Concurrent REQUIRED)
 
 # ---------------------------
 # Proto paths
@@ -119,4 +119,5 @@ target_link_libraries(ps4_client
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets
+        Qt6::Concurrent
 )
