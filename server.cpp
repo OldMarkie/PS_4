@@ -36,15 +36,34 @@ std::condition_variable queue_cv;
 // ---------------------------
 class DistributedAIService final : public ps4::DistributedAI::Service {
 public:
-    Status SendTask(ServerContext* context, const ps4::TaskRequest* request,
+    Status SendTask(ServerContext* context,
+        const ps4::TaskRequest* request,
         ps4::TaskResponse* response) override
     {
-        OCRTask task{ request->task(), response, context };
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            ocr_task_queue.push(task);
+        const std::string& imgPath = request->task();
+
+        cv::Mat image = cv::imread(imgPath);
+        if (image.empty()) {
+            response->set_result("Failed to open image: " + imgPath);
+            return Status::OK;
         }
-        queue_cv.notify_one();
+
+        // Init Tesseract
+        tesseract::TessBaseAPI ocr;
+        _putenv("TESSDATA_PREFIX=D:/Tools/vcpkg/installed/x64-windows/share/tessdata/");
+
+        if (ocr.Init(nullptr, "eng")) {
+            response->set_result("Failed to initialize Tesseract.");
+            return Status::OK;
+        }
+
+        ocr.SetImage(image.data, image.cols, image.rows, image.channels(), image.step);
+
+        char* raw_text = ocr.GetUTF8Text();
+        std::string extracted = raw_text ? raw_text : "";
+        delete[] raw_text; // IMPORTANT
+
+        response->set_result(extracted);
         return Status::OK;
     }
 };
@@ -90,26 +109,17 @@ void ocr_worker() {
 // ---------------------------
 // Server Runner
 // ---------------------------
-void RunServer(const std::string& address = "0.0.0.0:50051") {
+void RunServer() {
     DistributedAIService service;
 
     ServerBuilder builder;
-    builder.AddListeningPort(address, grpc::InsecureServerCredentials());
+    builder.AddListeningPort("0.0.0.0:50051", grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
 
-    // Start OCR worker threads
-    const int num_threads = 4;
-    std::vector<std::thread> workers;
-    for (int i = 0; i < num_threads; ++i) {
-        workers.emplace_back(ocr_worker);
-    }
-
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server running at " << address << std::endl;
+    std::cout << "Server running at 0.0.0.0:50051\n";
 
     server->Wait();
-
-    for (auto& t : workers) t.join();
 }
 
 // ---------------------------

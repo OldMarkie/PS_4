@@ -16,28 +16,44 @@ OCRClient::OCRClient(QObject* parent) : QObject(parent) {
 
 void OCRClient::sendImages(const QStringList& paths) {
     int total = paths.size();
-    int processed = 0;
+    auto processed = std::make_shared<std::atomic<int>>(0);
 
     for (const auto& path : paths) {
-        std::thread([this, path, total, &processed]() {
+        // copy path and shared state into the thread
+        std::string pathStd = path.toStdString();
+        auto processedCopy = processed;
+
+        std::thread([this, pathStd, total, processedCopy]() {
             ps4::TaskRequest req;
-            req.set_task(path.toStdString());
+            req.set_task(pathStd);
             ps4::TaskResponse resp;
             grpc::ClientContext ctx;
 
             grpc::Status status = stub_->SendTask(&ctx, req, &resp);
-            if (status.ok()) {
-                emit ocrResultReady(QString::fromStdString(resp.result()));
-            }
-            else {
-                emit ocrResultReady("RPC failed: " + QString::fromStdString(status.error_message()));
-            }
 
-            processed++;
-            emit progressUpdated((processed * 100) / total);
+            QString text = status.ok()
+                ? QString::fromStdString(resp.result())
+                : QString::fromStdString(std::string("RPC failed: ") + status.error_message());
+
+            // update counters
+            int done = ++(*processedCopy);
+            int progress = (done * 100) / total;
+
+            // Schedule signal emission on this QObject's thread (queued)
+            QMetaObject::invokeMethod(
+                this,
+                [this, text, progress]() {
+                    // This lambda runs in the thread that 'this' (OCRClient) lives in.
+                    emit ocrResultReady(text);
+                    emit progressUpdated(progress);
+                },
+                Qt::QueuedConnection
+            );
+
             }).detach();
     }
 }
+
 
 int main(int argc, char* argv[]) {
     QApplication a(argc, argv);
