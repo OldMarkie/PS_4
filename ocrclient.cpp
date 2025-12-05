@@ -15,15 +15,15 @@ struct FailedTask {
 static std::queue<FailedTask> failedTasks;
 static std::mutex failedTasksMutex;
 
-const int MAX_RETRIES = 3;
-const int RETRY_DELAY_MS = 500;
+const int MAX_RETRIES = 10;
+const int RETRY_DELAY_MS = 5000;
 const int RPC_TIMEOUT_SEC = 5;
 
 OCRClient::OCRClient(QObject* parent)
     : QObject(parent)
 {
     auto channel = grpc::CreateChannel(
-        "localhost:50051", grpc::InsecureChannelCredentials()
+        "192.168.1.4:50051", grpc::InsecureChannelCredentials()
     );
     stub_ = ps4::DistributedAI::NewStub(channel);
 
