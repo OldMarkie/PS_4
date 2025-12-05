@@ -15,6 +15,11 @@ struct FailedTask {
 static std::queue<FailedTask> failedTasks;
 static std::mutex failedTasksMutex;
 
+std::atomic<int> consecutiveFailures{ 0 };
+std::atomic<bool> circuitOpen{ false };
+
+const int FAILURE_THRESHOLD = 5;
+const int COOLDOWN_MS = 10000;
 const int MAX_RETRIES = 10;
 const int RETRY_DELAY_MS = 5000;
 const int RPC_TIMEOUT_SEC = 5;
@@ -101,9 +106,16 @@ void OCRClient::sendImages(const QStringList& paths)
     for (QString path : paths) {
         QtConcurrent::run([this, path, total, processed]() {
 
-            // -----------------------------
-            // Read image file into bytes
-            // -----------------------------
+            if (circuitOpen) {
+                QString result = "Service unavailable (circuit breaker open)";
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, path, result]() { emit resultReady(path, result); },
+                    Qt::QueuedConnection
+                );
+                return;
+            }
+
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly)) {
                 QString result = "Failed to open image: " + path;
@@ -123,9 +135,6 @@ void OCRClient::sendImages(const QStringList& paths)
             grpc::Status status;
             int attempt = 0;
 
-            // -----------------------------
-            // RPC retry loop
-            // -----------------------------
             while (attempt < MAX_RETRIES) {
                 grpc::ClientContext ctx;
                 ctx.set_deadline(std::chrono::system_clock::now() +
@@ -135,13 +144,24 @@ void OCRClient::sendImages(const QStringList& paths)
                 if (status.ok()) break;
 
                 ++attempt;
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(RETRY_DELAY_MS));
+                std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
             }
 
             if (!status.ok()) {
                 std::lock_guard<std::mutex> lock(failedTasksMutex);
                 failedTasks.push({ path, attempt });
+
+                if (++consecutiveFailures >= FAILURE_THRESHOLD && !circuitOpen) {
+                    circuitOpen = true;
+                    std::thread([=]() {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(COOLDOWN_MS));
+                        consecutiveFailures = 0;
+                        circuitOpen = false;
+                        }).detach();
+                }
+            }
+            else {
+                consecutiveFailures = 0; // reset on success
             }
 
             QString result = status.ok()
