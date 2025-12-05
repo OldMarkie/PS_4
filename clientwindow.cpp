@@ -90,3 +90,14 @@ void ClientWindow::updateProgress(int value)
 {
     progressBar->setValue(value);
 }
+
+void ClientWindow::clearGrid()
+{
+    QLayoutItem* child;
+    while ((child = grid->takeAt(0)) != nullptr) {
+        delete child->widget();
+        delete child;
+    }
+    row = col = 0;
+}
+

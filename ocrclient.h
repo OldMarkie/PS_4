@@ -15,7 +15,11 @@ public:
 signals:
     void progressUpdated(int percent);
     void resultReady(const QString& imagePath, const QString& result);
+    void batchCleared();
 
 private:
     std::unique_ptr<ps4::DistributedAI::Stub> stub_;
+    std::atomic<int> batchProcessed{ 0 };
+    int batchTotal = 0;                  
+    std::mutex batchMutex;               
 };

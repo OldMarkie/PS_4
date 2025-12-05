@@ -100,12 +100,22 @@ OCRClient::OCRClient(QObject* parent)
 
 void OCRClient::sendImages(const QStringList& paths)
 {
-    int total = paths.size();
-    auto processed = std::make_shared<std::atomic<int>>(0);
+    {
+        std::lock_guard<std::mutex> lock(batchMutex);
+        if (batchProcessed >= batchTotal) {
+            // Previous batch completed, reset
+            batchProcessed = 0;
+            batchTotal = 0;
+            // Optionally clear old results via signal
+            emit batchCleared();
+        }
+        batchTotal += paths.size();
+    }
 
     for (QString path : paths) {
-        QtConcurrent::run([this, path, total, processed]() {
+        QtConcurrent::run([this, path]() {
 
+            // ---- Circuit breaker check ----
             if (circuitOpen) {
                 QString result = "Service unavailable (circuit breaker open)";
                 QMetaObject::invokeMethod(
@@ -113,20 +123,30 @@ void OCRClient::sendImages(const QStringList& paths)
                     [this, path, result]() { emit resultReady(path, result); },
                     Qt::QueuedConnection
                 );
+                {
+                    std::lock_guard<std::mutex> lock(batchMutex);
+                    batchProcessed++;
+                    emit progressUpdated((batchProcessed * 100) / batchTotal);
+                }
                 return;
             }
 
+            // ---- Read file ----
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly)) {
                 QString result = "Failed to open image: " + path;
                 QMetaObject::invokeMethod(this, [this, path, result]() {
                     emit resultReady(path, result);
                     }, Qt::QueuedConnection);
+                {
+                    std::lock_guard<std::mutex> lock(batchMutex);
+                    batchProcessed++;
+                    emit progressUpdated((batchProcessed * 100) / batchTotal);
+                }
                 return;
             }
 
             QByteArray data = file.readAll();
-
             ps4::TaskRequest req;
             req.set_image_data(std::string(data.begin(), data.end()));
             req.set_filename(path.toStdString());
@@ -137,12 +157,9 @@ void OCRClient::sendImages(const QStringList& paths)
 
             while (attempt < MAX_RETRIES) {
                 grpc::ClientContext ctx;
-                ctx.set_deadline(std::chrono::system_clock::now() +
-                    std::chrono::seconds(RPC_TIMEOUT_SEC));
-
+                ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(RPC_TIMEOUT_SEC));
                 status = stub_->SendTask(&ctx, req, &resp);
                 if (status.ok()) break;
-
                 ++attempt;
                 std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
             }
@@ -150,7 +167,6 @@ void OCRClient::sendImages(const QStringList& paths)
             if (!status.ok()) {
                 std::lock_guard<std::mutex> lock(failedTasksMutex);
                 failedTasks.push({ path, attempt });
-
                 if (++consecutiveFailures >= FAILURE_THRESHOLD && !circuitOpen) {
                     circuitOpen = true;
                     std::thread([=]() {
@@ -161,22 +177,25 @@ void OCRClient::sendImages(const QStringList& paths)
                 }
             }
             else {
-                consecutiveFailures = 0; // reset on success
+                consecutiveFailures = 0;
             }
 
             QString result = status.ok()
                 ? QString::fromStdString(resp.result())
                 : "RPC Failed after retries";
 
-            int done = ++(*processed);
-            int progress = (done * 100) / total;
-
-            QMetaObject::invokeMethod(this, [this, path, result, progress]() {
-                emit resultReady(path, result);
-                emit progressUpdated(progress);
-                }, Qt::QueuedConnection);
+            {
+                std::lock_guard<std::mutex> lock(batchMutex);
+                batchProcessed++;
+                int progress = (batchProcessed * 100) / batchTotal;
+                QMetaObject::invokeMethod(this, [this, path, result, progress]() {
+                    emit resultReady(path, result);
+                    emit progressUpdated(progress);
+                    }, Qt::QueuedConnection);
+            }
             });
     }
 }
+
 
 

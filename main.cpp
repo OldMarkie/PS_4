@@ -9,6 +9,7 @@ int main(int argc, char* argv[])
     ClientWindow window;
     OCRClient client;
 
+    // Existing connections
     QObject::connect(&window, &ClientWindow::imagesChosen,
         &client, &OCRClient::sendImages);
 
@@ -17,6 +18,9 @@ int main(int argc, char* argv[])
 
     QObject::connect(&client, &OCRClient::progressUpdated,
         &window, &ClientWindow::updateProgress);
+
+    QObject::connect(&client, &OCRClient::batchCleared, &window, &ClientWindow::clearGrid);
+
 
     window.show();
     return app.exec();

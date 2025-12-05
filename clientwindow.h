@@ -12,6 +12,7 @@ class ClientWindow : public QWidget {
 
 public:
     explicit ClientWindow(QWidget* parent = nullptr);
+    void clearGrid();
 
 signals:
     void imagesChosen(const QStringList& files);
