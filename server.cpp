@@ -41,9 +41,13 @@ public:
         ps4::TaskResponse* response) override
     {
         try {
-            cv::Mat image = cv::imread(request->task(), cv::IMREAD_COLOR);
+            std::string data = request->image_data();
+            std::vector<uchar> buffer(data.begin(), data.end());
+
+            cv::Mat image = cv::imdecode(buffer, cv::IMREAD_COLOR);
+
             if (image.empty()) {
-                response->set_result("Failed to open image: " + request->task());
+                response->set_result("Failed to open image: " + request->filename());
                 return Status::OK;
             }
 
