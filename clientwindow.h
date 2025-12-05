@@ -20,6 +20,7 @@ signals:
 public slots:
     void addImageAndText(const QString& imgPath, const QString& ocrText);
     void updateProgress(int value);
+    void updateResultText(const QString& imagePath, const QString& newText);
 
 private:
     QPushButton* uploadBtn;

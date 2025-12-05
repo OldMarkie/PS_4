@@ -1,101 +1,91 @@
-#include "ocrclient.h"
+﻿#include "ocrclient.h"
 #include <QMetaObject>
+#include <QFile>
 #include <thread>
 #include <chrono>
 #include <queue>
 #include <mutex>
 #include <atomic>
-#include <QtConcurrent/QtConcurrent>
+#include <QtConcurrent>
+#include <QDebug>
 
 struct FailedTask {
     QString path;
-    int retries;
+    int retries = 0;
 };
 
 static std::queue<FailedTask> failedTasks;
 static std::mutex failedTasksMutex;
+static std::condition_variable retry_cv;
 
 std::atomic<int> consecutiveFailures{ 0 };
 std::atomic<bool> circuitOpen{ false };
 
-const int FAILURE_THRESHOLD = 5;
-const int COOLDOWN_MS = 10000;
-const int MAX_RETRIES = 10;
-const int RETRY_DELAY_MS = 5000;
+const int FAILURE_THRESHOLD = 2;
+const int COOLDOWN_MS = 5000;
+const int MAX_RETRIES = 999;
+const int RETRY_DELAY_MS = 1000;
 const int RPC_TIMEOUT_SEC = 5;
 
-OCRClient::OCRClient(QObject* parent)
-    : QObject(parent)
+OCRClient::OCRClient(QObject* parent) : QObject(parent)
 {
-    auto channel = grpc::CreateChannel(
-        "192.168.1.4:50051", grpc::InsecureChannelCredentials()
-    );
+    auto channel = grpc::CreateChannel("192.168.1.4:50051", grpc::InsecureChannelCredentials());
     stub_ = ps4::DistributedAI::NewStub(channel);
 
-    // Start background thread to retry failed tasks
+    // Background retry thread
     std::thread([this]() {
         while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
             std::queue<FailedTask> tasksToRetry;
 
             {
-                std::lock_guard<std::mutex> lock(failedTasksMutex);
-                std::swap(tasksToRetry, failedTasks);
+                std::unique_lock<std::mutex> lock(failedTasksMutex);
+                retry_cv.wait_for(lock, std::chrono::seconds(2));  // Just wait
+                if (failedTasks.empty()) continue;
+                tasksToRetry.swap(failedTasks);
             }
 
             while (!tasksToRetry.empty()) {
-                FailedTask task = tasksToRetry.front();
+                FailedTask task = std::move(tasksToRetry.front());
                 tasksToRetry.pop();
-
-                ps4::TaskRequest req;
 
                 QFile file(task.path);
                 if (!file.open(QIODevice::ReadOnly)) {
-                    QString result = "Failed to open image: " + task.path;
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this, task, result]() { emit resultReady(task.path, result); },
-                        Qt::QueuedConnection
-                    );
-                    continue; // not return, because we are inside a loop
+                    emitResult(task.path, "File missing: " + task.path);
+                    continue;
                 }
 
-
-                // Read bytes
                 QByteArray data = file.readAll();
-                req.set_image_data(std::string(data.begin(), data.end()));
+                ps4::TaskRequest req;
+                req.set_image_data(data.constData(), data.size());
                 req.set_filename(task.path.toStdString());
-
 
                 ps4::TaskResponse resp;
                 grpc::ClientContext ctx;
                 ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(RPC_TIMEOUT_SEC));
+
                 grpc::Status status = stub_->SendTask(&ctx, req, &resp);
 
                 if (status.ok()) {
-                    QString result = QString::fromStdString(resp.result());
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this, task, result]() { emit resultReady(task.path, result); },
-                        Qt::QueuedConnection
-                    );
+                    consecutiveFailures = 0;
+                    emitResult(task.path, QString::fromStdString(resp.result()));
                 }
                 else if (++task.retries < MAX_RETRIES) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
-                    std::lock_guard<std::mutex> lock(failedTasksMutex);
-                    failedTasks.push(task); // re-queue
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    { std::lock_guard<std::mutex> l(failedTasksMutex); failedTasks.push(std::move(task)); }
                 }
                 else {
-                    QString result = "RPC Failed after retries: " + QString::fromStdString(status.error_message());
-                    QMetaObject::invokeMethod(
-                        this,
-                        [this, task, result]() { emit resultReady(task.path, result); },
-                        Qt::QueuedConnection
-                    );
+                    emitResult(task.path, "Failed permanently: " + QString::fromStdString(status.error_message()));
                 }
             }
         }
         }).detach();
+}
+
+void OCRClient::emitResult(const QString& path, const QString& result)
+{
+    QMetaObject::invokeMethod(this, [this, path, result] {
+        emit resultReady(path, result);
+        }, Qt::QueuedConnection);
 }
 
 void OCRClient::sendImages(const QStringList& paths)
@@ -103,99 +93,72 @@ void OCRClient::sendImages(const QStringList& paths)
     {
         std::lock_guard<std::mutex> lock(batchMutex);
         if (batchProcessed >= batchTotal) {
-            // Previous batch completed, reset
             batchProcessed = 0;
             batchTotal = 0;
-            // Optionally clear old results via signal
             emit batchCleared();
         }
         batchTotal += paths.size();
     }
 
-    for (QString path : paths) {
+    for (const QString& path : paths) {
         QtConcurrent::run([this, path]() {
-
-            // ---- Circuit breaker check ----
-            if (circuitOpen) {
-                QString result = "Service unavailable (circuit breaker open)";
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, path, result]() { emit resultReady(path, result); },
-                    Qt::QueuedConnection
-                );
-                {
-                    std::lock_guard<std::mutex> lock(batchMutex);
-                    batchProcessed++;
-                    emit progressUpdated((batchProcessed * 100) / batchTotal);
-                }
+            if (circuitOpen.load()) {
+                { std::lock_guard<std::mutex> l(failedTasksMutex); failedTasks.push({ path, 0 }); }
+                emitResult(path, "Server offline – will retry when back");
+                { std::lock_guard<std::mutex> l(batchMutex); ++batchProcessed; emit progressUpdated((batchProcessed * 100) / batchTotal); }
                 return;
             }
 
-            // ---- Read file ----
             QFile file(path);
             if (!file.open(QIODevice::ReadOnly)) {
-                QString result = "Failed to open image: " + path;
-                QMetaObject::invokeMethod(this, [this, path, result]() {
-                    emit resultReady(path, result);
-                    }, Qt::QueuedConnection);
-                {
-                    std::lock_guard<std::mutex> lock(batchMutex);
-                    batchProcessed++;
-                    emit progressUpdated((batchProcessed * 100) / batchTotal);
-                }
+                emitResult(path, "Cannot open file: " + path);
+                { std::lock_guard<std::mutex> l(batchMutex); ++batchProcessed; emit progressUpdated((batchProcessed * 100) / batchTotal); }
                 return;
             }
 
             QByteArray data = file.readAll();
             ps4::TaskRequest req;
-            req.set_image_data(std::string(data.begin(), data.end()));
-            req.set_filename(path.toStdString());
+            req.set_image_data(data.constData(), data.size());     // CORRECT
+            req.set_filename(path.toStdString());                  // CORRECT
 
             ps4::TaskResponse resp;
             grpc::Status status;
             int attempt = 0;
 
-            while (attempt < MAX_RETRIES) {
+            do {
                 grpc::ClientContext ctx;
                 ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(RPC_TIMEOUT_SEC));
                 status = stub_->SendTask(&ctx, req, &resp);
                 if (status.ok()) break;
                 ++attempt;
                 std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
-            }
+            } while (attempt < MAX_RETRIES);
 
             if (!status.ok()) {
-                std::lock_guard<std::mutex> lock(failedTasksMutex);
-                failedTasks.push({ path, attempt });
-                if (++consecutiveFailures >= FAILURE_THRESHOLD && !circuitOpen) {
-                    circuitOpen = true;
-                    std::thread([=]() {
+                { std::lock_guard<std::mutex> l(failedTasksMutex); failedTasks.push({ path, attempt }); }
+
+                if (++consecutiveFailures >= FAILURE_THRESHOLD && !circuitOpen.exchange(true)) {
+                    qDebug() << "Circuit breaker OPENED";
+                    std::thread([this]() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(COOLDOWN_MS));
-                        consecutiveFailures = 0;
                         circuitOpen = false;
+                        consecutiveFailures = 0;
+                        qDebug() << "Circuit breaker CLOSED — RETRYING ALL TASKS NOW!";
+
+                        // Wake up 5 times — 100% guaranteed
+                        for (int i = 0; i < 5; ++i) {
+                            retry_cv.notify_one();
+                        }
                         }).detach();
                 }
+                emitResult(path, "Failed – retrying in background...");
             }
             else {
                 consecutiveFailures = 0;
+                emitResult(path, QString::fromStdString(resp.result()));
             }
 
-            QString result = status.ok()
-                ? QString::fromStdString(resp.result())
-                : "RPC Failed after retries";
-
-            {
-                std::lock_guard<std::mutex> lock(batchMutex);
-                batchProcessed++;
-                int progress = (batchProcessed * 100) / batchTotal;
-                QMetaObject::invokeMethod(this, [this, path, result, progress]() {
-                    emit resultReady(path, result);
-                    emit progressUpdated(progress);
-                    }, Qt::QueuedConnection);
-            }
+            { std::lock_guard<std::mutex> l(batchMutex); ++batchProcessed; emit progressUpdated((batchProcessed * 100) / batchTotal); }
             });
     }
 }
-
-
-

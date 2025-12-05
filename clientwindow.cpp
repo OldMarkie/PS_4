@@ -58,32 +58,47 @@ ClientWindow::ClientWindow(QWidget* parent)
 
 void ClientWindow::addImageAndText(const QString& imgPath, const QString& ocrText)
 {
-    // Load scaled image
+    // STEP 1: Try to UPDATE existing entry first
+    for (int i = 0; i < grid->count(); ++i) {
+        QLayoutItem* item = grid->itemAt(i);
+        if (!item || !item->widget()) continue;
+
+        QWidget* container = item->widget();
+        QVBoxLayout* v = qobject_cast<QVBoxLayout*>(container->layout());
+        if (v && v->count() >= 2) {
+            QLabel* textLabel = qobject_cast<QLabel*>(v->itemAt(1)->widget());
+            if (textLabel && textLabel->property("imagePath").toString() == imgPath) {
+                textLabel->setText(ocrText);  // UPDATE SUCCESS!
+                return;
+            }
+        }
+    }
+
+    // STEP 2: If not found  add new one
     QPixmap pix(imgPath);
+    if (pix.isNull()) return;
+
     QPixmap scaled = pix.scaled(220, 80, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
-    QLabel* img = new QLabel();
-    img->setPixmap(scaled);
-    img->setAlignment(Qt::AlignCenter);
-    img->setStyleSheet("background: white; padding: 4px;");
+    QLabel* imgLabel = new QLabel();
+    imgLabel->setPixmap(scaled);
+    imgLabel->setAlignment(Qt::AlignCenter);
+    imgLabel->setStyleSheet("background: white; padding: 6px; border-radius: 8px;");
 
-    QLabel* txt = new QLabel(ocrText);
-    txt->setStyleSheet("color: white; font-size: 12px;");
-    txt->setAlignment(Qt::AlignLeft);
+    QLabel* textLabel = new QLabel(ocrText);
+    textLabel->setStyleSheet("color: #00ff00; font-size: 14px; font-weight: bold;");
+    textLabel->setWordWrap(true);
+    textLabel->setAlignment(Qt::AlignCenter);
+    textLabel->setProperty("imagePath", imgPath);  // CRITICAL
 
     QWidget* container = new QWidget();
     QVBoxLayout* v = new QVBoxLayout(container);
-    v->setSpacing(4);
-    v->addWidget(img);
-    v->addWidget(txt);
+    v->setSpacing(8);
+    v->addWidget(imgLabel);
+    v->addWidget(textLabel);
 
-    grid->addWidget(container, row, col);
-
-    col++;
-    if (col == 4) { // 4 columns like screenshot
-        col = 0;
-        row++;
-    }
+    grid->addWidget(container, row, col++);
+    if (col >= 4) { col = 0; row++; }
 }
 
 void ClientWindow::updateProgress(int value)
@@ -99,5 +114,24 @@ void ClientWindow::clearGrid()
         delete child;
     }
     row = col = 0;
+}
+
+void ClientWindow::updateResultText(const QString& imagePath, const QString& newText)
+{
+    // Find all labels in the grid and update the one matching this path
+    for (int i = 0; i < grid->count(); ++i) {
+        QLayoutItem* item = grid->itemAt(i);
+        if (item && item->widget()) {
+            QWidget* container = item->widget();
+            QVBoxLayout* layout = qobject_cast<QVBoxLayout*>(container->layout());
+            if (layout && layout->count() >= 2) {
+                QLabel* textLabel = qobject_cast<QLabel*>(layout->itemAt(1)->widget());
+                if (textLabel && textLabel->property("imagePath").toString() == imagePath) {
+                    textLabel->setText(newText);
+                    return;
+                }
+            }
+        }
+    }
 }
 
